@@ -1,6 +1,8 @@
 import os
+import re
 import json
 import time
+import shutil
 import argparse
 import sqlite3
 import requests
@@ -126,11 +128,20 @@ if IN_COLAB:
     print("Google Colab detected. Mounting Google Drive...")
     drive.mount('/content/drive')
     BASE_DIR = "/content/drive/MyDrive/Metadata"
+    # Local paths on Colab local VM SSD to prevent SQLite/FUSE filesystem corruption
+    LOCAL_DB_PATH = "/content/metadata.db"
+    LOCAL_THUMBNAILS_DIR = "/content/Thumbnails"
 else:
     BASE_DIR = "."
+    LOCAL_DB_PATH = None
+    LOCAL_THUMBNAILS_DIR = None
 
-# Ensure output directory exists
+# Ensure base directory and backup folders exist on Drive/Local
 os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "Thumbnails"), exist_ok=True)
+
+if LOCAL_THUMBNAILS_DIR:
+    os.makedirs(LOCAL_THUMBNAILS_DIR, exist_ok=True)
 
 def load_existing_data(file_path):
     """Loads existing JSON metadata list."""
@@ -326,17 +337,44 @@ def fetch_page(query, variables, retries=5, backoff=2):
     print("Max retries exceeded.")
     return None
 
+def sync_to_drive(local_db_path, drive_db_path, local_thumb_dir, drive_thumb_dir):
+    """Synchronizes updated database and local image backups to Google Drive mount."""
+    try:
+        # 1. Sync database file
+        if local_db_path and os.path.exists(local_db_path):
+            shutil.copy2(local_db_path, drive_db_path)
+            
+        # 2. Sync newly downloaded thumbnail files
+        if local_thumb_dir and os.path.exists(local_thumb_dir):
+            for file_name in os.listdir(local_thumb_dir):
+                src_file = os.path.join(local_thumb_dir, file_name)
+                dst_file = os.path.join(drive_thumb_dir, file_name)
+                # Only copy if file doesn't exist on Google Drive or size is different
+                if not os.path.exists(dst_file) or os.path.getsize(src_file) != os.path.getsize(dst_file):
+                    shutil.copy2(src_file, dst_file)
+                    
+        # 3. Force FUSE flush
+        if hasattr(os, "sync"):
+            os.sync()
+    except Exception as e:
+        print(f"Warning: Synchronization to Google Drive failed: {e}")
+
 def scrape_metadata(target_type, output_file, db_path, progress_file, max_pages, delay):
     """Orchestrates the scraping process, partitioning by year and countryOrigin to bypass page capping."""
     print(f"\n--- Starting Partitioned Scrape for {target_type.upper()} ---")
     print(f"JSON Output file: {output_file}")
+    
+    # Determine the execution paths (local SSD if in Colab to prevent corruption)
+    current_db = LOCAL_DB_PATH if IN_COLAB else db_path
+    current_thumbnails_dir = LOCAL_THUMBNAILS_DIR if IN_COLAB else os.path.join(BASE_DIR, "Thumbnails")
+    drive_thumbnails_dir = os.path.join(BASE_DIR, "Thumbnails")
     
     # 1. Load existing JSON items and DB processed IDs
     items = load_existing_data(output_file)
     json_ids = {item["_id"] for item in items if "_id" in item}
     
     table_name = "manga_metadata" if target_type == "manga" else "anime_metadata"
-    db_ids = load_processed_ids_from_db(db_path, table_name)
+    db_ids = load_processed_ids_from_db(current_db, table_name)
     
     fetched_ids = json_ids.union(db_ids)
     print(f"Total processed records loaded: {len(fetched_ids)}")
@@ -435,7 +473,7 @@ def scrape_metadata(target_type, output_file, db_path, progress_file, max_pages,
                 all_partition_ids.update(page_ids)
                 
                 # Write page-by-page results to SQLite
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(current_db)
                 cursor = conn.cursor()
                 
                 new_items_count = 0
@@ -444,12 +482,27 @@ def scrape_metadata(target_type, output_file, db_path, progress_file, max_pages,
                         continue
                     _id = edge.get("_id")
                     if _id not in fetched_ids:
-                        # 1. Download image cover as BLOB
+                        # 1. Download cover image
                         thumbnail_url = edge.get("thumbnail")
                         print(f"Downloading cover thumbnail for: {edge.get('name') or _id}...")
                         thumbnail_blob = download_thumbnail(thumbnail_url)
                         
-                        # 2. Insert into SQLite table
+                        # 2. Store image to separate folder as standalone backup
+                        if thumbnail_blob and current_thumbnails_dir:
+                            # Extract extension from URL, default to jpg
+                            ext = "jpg"
+                            if thumbnail_url:
+                                ext_match = re.search(r'\.(webp|png|jpg|jpeg|gif)\b', thumbnail_url, re.IGNORECASE)
+                                if ext_match:
+                                    ext = ext_match.group(1).lower()
+                            img_path = os.path.join(current_thumbnails_dir, f"{_id}.{ext}")
+                            try:
+                                with open(img_path, "wb") as img_file:
+                                    img_file.write(thumbnail_blob)
+                            except Exception as e:
+                                print(f"  Warning: Failed to save thumbnail file to disk: {e}")
+                        
+                        # 3. Insert metadata and BLOB into SQLite
                         if target_type == "manga":
                             cursor.execute("""
                             INSERT OR REPLACE INTO manga_metadata (
@@ -546,13 +599,19 @@ def scrape_metadata(target_type, output_file, db_path, progress_file, max_pages,
                 }
                 save_progress(progress_file, progress)
                 
+                # Sync local changes to Google Drive mount if in Colab
+                if IN_COLAB:
+                    print("Syncing files to Google Drive...")
+                    sync_to_drive(LOCAL_DB_PATH, db_path, LOCAL_THUMBNAILS_DIR, drive_thumbnails_dir)
+                    print("Sync complete.")
+                
                 pages_processed += 1
                 page += 1
                 
                 if delay > 0:
                     time.sleep(delay)
                     
-            # Set page to 1 for completed country partitions
+            # Reset page to 1 for completed country partitions
             progress[target_type] = {
                 "current_year": year,
                 "current_country": country,
@@ -619,8 +678,10 @@ def main():
     
     print(f"Working Directory resolved: {BASE_DIR}")
     
-    # Init SQLite tables
-    init_sqlite_db(db_path)
+    # Initialize SQLite database schema
+    # If Colab, initialize local database first
+    current_db = LOCAL_DB_PATH if IN_COLAB else db_path
+    init_sqlite_db(current_db)
     
     if args.type in ["manga", "both"]:
         scrape_metadata("manga", output_manga_path, db_path, progress_path, args.pages, args.delay)

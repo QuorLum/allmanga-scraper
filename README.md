@@ -23,8 +23,9 @@ By query partitioning, the script retrieves **100% of the catalog** without hitt
 ## Features
 
 - **Double Format Output**: Saves data in JSON lists and a structured SQLite database (`metadata.db`).
-- **BLOB Thumbnail Storage**: Resolvescover image CDNs (`https://aln.youtube-anime.com/`) for relative covers, downloads the binary content, and stores it in the database as a `BLOB`.
-- **Granular Progress Resuming**: Writes partition progress to `scraping_progress.json` after every page. If interrupted, simply restart the scraper to resume from the exact year, country, and page.
+- **SSD Database Isolation (Anti-Corruption)**: When running in Google Colab, the SQLite database is written to the high-speed VM local disk (`/content/metadata.db`) and safely copied to Google Drive at the end of each page, preventing FUSE file corruption.
+- **Backup Thumbnails Directory**: Downloaded cover images are saved inside the database AND backed up as individual image files inside the `/Metadata/Thumbnails/` folder (named as `{_id}.jpg` or `{_id}.png` using their original CDN formats).
+- **Granular Progress Resuming**: Writes partition progress to `scraping_progress.json` after every page. If interrupted, restarting the scraper resumes from the exact year, country, and page.
 - **Atomic Writing**: Writes to a temporary `.tmp` file before replacing the target JSON to prevent file corruption during sudden execution terminations.
 - **Network Resilience**: Uses exponential backoff and automatic retry logic for transient HTTP errors (429, 500, 502, 503, 504).
 - **Google Colab Detection**: Automatically detects Google Colab, mounts Google Drive (`/content/drive`), and saves all metadata files to `/content/drive/MyDrive/Metadata`.
