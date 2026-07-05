@@ -1,0 +1,16 @@
+# Local data files
+test_anime.json
+test_manga.json
+manga_metadata.json
+anime_metadata.json
+metadata.db
+scraping_progress.json
+*.db
+*.json
+
+# Temporary files
+*.tmp
+*.log
+
+# Scripts
+create_notebook.py
