@@ -198,8 +198,9 @@ def load_processed_ids_from_db(db_path, table_name):
     """Retrieves processed IDs from the SQLite database to avoid duplicates."""
     processed = set()
     if os.path.exists(db_path):
+        conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=30.0)
             cursor = conn.cursor()
             # check if table exists
             cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' and name='{table_name}'")
@@ -208,16 +209,19 @@ def load_processed_ids_from_db(db_path, table_name):
                 rows = cursor.fetchall()
                 for row in rows:
                     processed.add(row[0])
-            conn.close()
         except Exception as e:
             print(f"Warning: Could not read processed IDs from SQLite {table_name}: {e}")
+        finally:
+            if conn:
+                conn.close()
     return processed
 
 def init_sqlite_db(db_path):
     """Creates the SQLite database and necessary tables if they do not exist."""
     print(f"Initializing SQLite database at {db_path}...")
+    conn = None
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=30.0)
         cursor = conn.cursor()
         
         # Manga Table (including BLOB for thumbnails)
@@ -285,9 +289,11 @@ def init_sqlite_db(db_path):
         """)
         
         conn.commit()
-        conn.close()
     except Exception as e:
         print(f"Error initializing SQLite database: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def download_thumbnail(thumbnail_url):
     """Downloads the thumbnail image binary content from the cover server CDN."""
@@ -473,117 +479,117 @@ def scrape_metadata(target_type, output_file, db_path, progress_file, max_pages,
                 all_partition_ids.update(page_ids)
                 
                 # Write page-by-page results to SQLite
-                conn = sqlite3.connect(current_db)
-                cursor = conn.cursor()
-                
-                new_items_count = 0
-                for edge in edges:
-                    if not edge:
-                        continue
-                    _id = edge.get("_id")
-                    if _id not in fetched_ids:
-                        # 1. Download cover image
-                        thumbnail_url = edge.get("thumbnail")
-                        print(f"Downloading cover thumbnail for: {edge.get('name') or _id}...")
-                        thumbnail_blob = download_thumbnail(thumbnail_url)
-                        
-                        # 2. Store image to separate folder as standalone backup
-                        if thumbnail_blob and current_thumbnails_dir:
-                            # Extract extension from URL, default to jpg
-                            ext = "jpg"
-                            if thumbnail_url:
-                                ext_match = re.search(r'\.(webp|png|jpg|jpeg|gif)\b', thumbnail_url, re.IGNORECASE)
-                                if ext_match:
-                                    ext = ext_match.group(1).lower()
-                            img_path = os.path.join(current_thumbnails_dir, f"{_id}.{ext}")
-                            try:
-                                with open(img_path, "wb") as img_file:
-                                    img_file.write(thumbnail_blob)
-                            except Exception as e:
-                                print(f"  Warning: Failed to save thumbnail file to disk: {e}")
-                        
-                        # 3. Insert metadata and BLOB into SQLite
-                        if target_type == "manga":
-                            cursor.execute("""
-                            INSERT OR REPLACE INTO manga_metadata (
-                                _id, name, englishName, nativeName, thumbnail_url, thumbnail_blob,
-                                lastChapterInfo, lastChapterDate, chapterCount, volumes, type, season,
-                                score, airedStart, availableChapters, lastUpdateEnd, slugTime,
-                                countryOfOrigin, characterCount, description, status, altNames,
-                                authors, genres, tags
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                _id,
-                                edge.get("name"),
-                                edge.get("englishName"),
-                                edge.get("nativeName"),
-                                thumbnail_url,
-                                sqlite3.Binary(thumbnail_blob) if thumbnail_blob else None,
-                                json.dumps(edge.get("lastChapterInfo")),
-                                json.dumps(edge.get("lastChapterDate")),
-                                edge.get("chapterCount"),
-                                edge.get("volumes"),
-                                edge.get("type"),
-                                json.dumps(edge.get("season")),
-                                edge.get("score"),
-                                json.dumps(edge.get("airedStart")),
-                                json.dumps(edge.get("availableChapters")),
-                                edge.get("lastUpdateEnd"),
-                                edge.get("slugTime"),
-                                edge.get("countryOfOrigin"),
-                                edge.get("characterCount"),
-                                edge.get("description"),
-                                edge.get("status"),
-                                json.dumps(edge.get("altNames")),
-                                json.dumps(edge.get("authors")),
-                                json.dumps(edge.get("genres")),
-                                json.dumps(edge.get("tags"))
-                            ))
-                        else:
-                            cursor.execute("""
-                            INSERT OR REPLACE INTO anime_metadata (
-                                _id, name, englishName, nativeName, slugTime, thumbnail_url, thumbnail_blob,
-                                lastEpisodeInfo, lastEpisodeDate, type, season, score, airedStart,
-                                availableEpisodes, episodeDuration, episodeCount, lastUpdateEnd,
-                                characterCount, description, status, genres, tags, altNames,
-                                studios, countryOfOrigin, rating, averageScore
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                _id,
-                                edge.get("name"),
-                                edge.get("englishName"),
-                                edge.get("nativeName"),
-                                edge.get("slugTime"),
-                                thumbnail_url,
-                                sqlite3.Binary(thumbnail_blob) if thumbnail_blob else None,
-                                json.dumps(edge.get("lastEpisodeInfo")),
-                                json.dumps(edge.get("lastEpisodeDate")),
-                                edge.get("type"),
-                                json.dumps(edge.get("season")),
-                                edge.get("score"),
-                                json.dumps(edge.get("airedStart")),
-                                json.dumps(edge.get("availableEpisodes")),
-                                edge.get("episodeDuration"),
-                                edge.get("episodeCount"),
-                                edge.get("lastUpdateEnd"),
-                                edge.get("characterCount"),
-                                edge.get("description"),
-                                edge.get("status"),
-                                json.dumps(edge.get("genres")),
-                                json.dumps(edge.get("tags")),
-                                json.dumps(edge.get("altNames")),
-                                json.dumps(edge.get("studios")),
-                                edge.get("countryOfOrigin"),
-                                edge.get("rating"),
-                                edge.get("averageScore")
-                            ))
-                        
-                        items.append(edge)
-                        fetched_ids.add(_id)
-                        new_items_count += 1
-                
-                conn.commit()
-                conn.close()
+                conn = sqlite3.connect(current_db, timeout=30.0)
+                try:
+                    cursor = conn.cursor()
+                    new_items_count = 0
+                    for edge in edges:
+                        if not edge:
+                            continue
+                        _id = edge.get("_id")
+                        if _id not in fetched_ids:
+                            # 1. Download cover image
+                            thumbnail_url = edge.get("thumbnail")
+                            print(f"Downloading cover thumbnail for: {edge.get('name') or _id}...")
+                            thumbnail_blob = download_thumbnail(thumbnail_url)
+                            
+                            # 2. Store image to separate folder as standalone backup
+                            if thumbnail_blob and current_thumbnails_dir:
+                                # Extract extension from URL, default to jpg
+                                ext = "jpg"
+                                if thumbnail_url:
+                                    ext_match = re.search(r'\.(webp|png|jpg|jpeg|gif)\b', thumbnail_url, re.IGNORECASE)
+                                    if ext_match:
+                                        ext = ext_match.group(1).lower()
+                                img_path = os.path.join(current_thumbnails_dir, f"{_id}.{ext}")
+                                try:
+                                    with open(img_path, "wb") as img_file:
+                                        img_file.write(thumbnail_blob)
+                                except Exception as e:
+                                    print(f"  Warning: Failed to save thumbnail file to disk: {e}")
+                            
+                            # 3. Insert metadata and BLOB into SQLite
+                            if target_type == "manga":
+                                cursor.execute("""
+                                INSERT OR REPLACE INTO manga_metadata (
+                                    _id, name, englishName, nativeName, thumbnail_url, thumbnail_blob,
+                                    lastChapterInfo, lastChapterDate, chapterCount, volumes, type, season,
+                                    score, airedStart, availableChapters, lastUpdateEnd, slugTime,
+                                    countryOfOrigin, characterCount, description, status, altNames,
+                                    authors, genres, tags
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    _id,
+                                    edge.get("name"),
+                                    edge.get("englishName"),
+                                    edge.get("nativeName"),
+                                    thumbnail_url,
+                                    sqlite3.Binary(thumbnail_blob) if thumbnail_blob else None,
+                                    json.dumps(edge.get("lastChapterInfo")),
+                                    json.dumps(edge.get("lastChapterDate")),
+                                    edge.get("chapterCount"),
+                                    edge.get("volumes"),
+                                    edge.get("type"),
+                                    json.dumps(edge.get("season")),
+                                    edge.get("score"),
+                                    json.dumps(edge.get("airedStart")),
+                                    json.dumps(edge.get("availableChapters")),
+                                    edge.get("lastUpdateEnd"),
+                                    edge.get("slugTime"),
+                                    edge.get("countryOfOrigin"),
+                                    edge.get("characterCount"),
+                                    edge.get("description"),
+                                    edge.get("status"),
+                                    json.dumps(edge.get("altNames")),
+                                    json.dumps(edge.get("authors")),
+                                    json.dumps(edge.get("genres")),
+                                    json.dumps(edge.get("tags"))
+                                ))
+                            else:
+                                cursor.execute("""
+                                INSERT OR REPLACE INTO anime_metadata (
+                                    _id, name, englishName, nativeName, slugTime, thumbnail_url, thumbnail_blob,
+                                    lastEpisodeInfo, lastEpisodeDate, type, season, score, airedStart,
+                                    availableEpisodes, episodeDuration, episodeCount, lastUpdateEnd,
+                                    characterCount, description, status, genres, tags, altNames,
+                                    studios, countryOfOrigin, rating, averageScore
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    _id,
+                                    edge.get("name"),
+                                    edge.get("englishName"),
+                                    edge.get("nativeName"),
+                                    edge.get("slugTime"),
+                                    thumbnail_url,
+                                    sqlite3.Binary(thumbnail_blob) if thumbnail_blob else None,
+                                    json.dumps(edge.get("lastEpisodeInfo")),
+                                    json.dumps(edge.get("lastEpisodeDate")),
+                                    edge.get("type"),
+                                    json.dumps(edge.get("season")),
+                                    edge.get("score"),
+                                    json.dumps(edge.get("airedStart")),
+                                    json.dumps(edge.get("availableEpisodes")),
+                                    edge.get("episodeDuration"),
+                                    edge.get("episodeCount"),
+                                    edge.get("lastUpdateEnd"),
+                                    edge.get("characterCount"),
+                                    edge.get("description"),
+                                    edge.get("status"),
+                                    json.dumps(edge.get("genres")),
+                                    json.dumps(edge.get("tags")),
+                                    json.dumps(edge.get("altNames")),
+                                    json.dumps(edge.get("studios")),
+                                    edge.get("countryOfOrigin"),
+                                    edge.get("rating"),
+                                    edge.get("averageScore")
+                                ))
+                            
+                            items.append(edge)
+                            fetched_ids.add(_id)
+                            new_items_count += 1
+                    conn.commit()
+                finally:
+                    conn.close()
                 
                 print(f"Page {page} processed. Added {new_items_count} new records. Total saved items: {len(items)}")
                 
