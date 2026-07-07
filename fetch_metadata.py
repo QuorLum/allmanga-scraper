@@ -687,6 +687,16 @@ def main():
     # Initialize SQLite database schema
     # If Colab, initialize local database first
     current_db = LOCAL_DB_PATH if IN_COLAB else db_path
+    
+    # Restore existing database from Google Drive to local SSD if running in Colab
+    if IN_COLAB and os.path.exists(db_path):
+        try:
+            print(f"Restoring existing database from Google Drive to local VM SSD...")
+            shutil.copy2(db_path, LOCAL_DB_PATH)
+            print("Database restored successfully.")
+        except Exception as e:
+            print(f"Warning: Could not copy existing database from Google Drive: {e}")
+            
     init_sqlite_db(current_db)
     
     if args.type in ["manga", "both"]:
